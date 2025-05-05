@@ -373,7 +373,7 @@ st.divider()
 if search_button and search_query:
     # --- Resultados da Busca Específica ---
     st.markdown(f"### Resultados da Busca por: \t'{search_query}'")
-    query_normalized = \t''.join(filter(str.isdigit, str(search_query)))
+    query_normalized = ''.join(filter(str.isdigit, str(search_query)))
 
     mask = (
         df_display["NOME DO CLIENTE"].str.contains(search_query, case=False, na=False)
