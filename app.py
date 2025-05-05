@@ -4,12 +4,13 @@ import plotly.express as px
 from dateutil.relativedelta import relativedelta
 from collections import Counter
 import os
+import numpy as np
 from io import BytesIO
 
 # --- Configuração da Página ---
 st.set_page_config(
     page_title="Emplacamentos VANS De Nigris",
-    page_icon="🚚", # Consider changing icon to a van?
+    page_icon="🚚",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -77,15 +78,28 @@ LOGO_COLOR_PATH = os.path.join(DATA_DIR, "logo_denigris_colorido.png")
 LOGO_WHITE_PATH = os.path.join(DATA_DIR, "logo_denigris_branco.png")
 
 # --- Nomes das Colunas Opcionais (Definidos Globalmente) ---
+# Certifique-se que estes nomes correspondem EXATAMENTE aos da sua planilha
 NOME_COLUNA_ENDERECO = "ENDEREÇO COMPLETO"
-NOME_COLUNA_TELEFONE = "TELEFONE1" # Nome da coluna de telefone definido
+NOME_COLUNA_TELEFONE = "TELEFONE1" # <--- IMPORTANTE: Verifique e ajuste se necessário!
 
 # --- Funções de Carregamento de Dados ---
-# @st.cache_data # Cache pode ser reativado se a performance for um problema, mas pode interferir com o upload
+@st.cache_data(ttl=3600) # Cache por 1 hora para evitar recarregamentos constantes
 def load_data(file_path_or_buffer):
     """Carrega e pré-processa os dados do arquivo Excel."""
     try:
         df = pd.read_excel(file_path_or_buffer)
+
+        # Verificar se o DataFrame está vazio
+        if df.empty:
+            st.error("O arquivo Excel não contém dados.")
+            return None
+
+        # Garantir que colunas essenciais para análise existam
+        essential_cols = ["Marca", "Segmento", "NO_CIDADE", "Data emplacamento", "CNPJ CLIENTE", "NOME DO CLIENTE"]
+        missing_cols = [col for col in essential_cols if col not in df.columns]
+        if missing_cols:
+            st.error(f"Erro: Colunas essenciais não encontradas no arquivo Excel: {", ".join(missing_cols)}")
+            return None
 
         # Limpeza e conversão de tipos (com dayfirst=True)
         df["Data emplacamento"] = pd.to_datetime(df["Data emplacamento"], errors="coerce", dayfirst=True)
@@ -103,22 +117,42 @@ def load_data(file_path_or_buffer):
         else:
             df[NOME_COLUNA_TELEFONE] = "N/A"
 
-        # Garantir que colunas essenciais para análise existam
-        for col in ["Marca", "Segmento", "NO_CIDADE", "Data emplacamento"]:
-             if col not in df.columns:
-                  st.error(f"Erro: Coluna essencial 	'{col}	' não encontrada no arquivo Excel.")
-                  return None
-
+        # Normalizar CNPJ
         df["CNPJ_NORMALIZED"] = df["CNPJ CLIENTE"].str.replace(r"[.\\/-]", "", regex=True)
+        
+        # Remover linhas onde datas ou colunas essenciais são inválidas
+        # Primeiro, remover linhas com data de emplacamento inválida
+        df = df.dropna(subset=["Data emplacamento"])
+        
+        # Extrair ano e mês com tratamento seguro para NaN
         df["Ano"] = df["Data emplacamento"].dt.year
         df["Mes"] = df["Data emplacamento"].dt.month
-        df["AnoMesNum"] = df["Data emplacamento"].dt.strftime("%Y%m").astype(int) # Para ordenação
-        df["AnoMesStr"] = df["Data emplacamento"].dt.strftime("%Y-%m") # Para exibição
-
-        # Remover linhas onde datas ou colunas essenciais são inválidas
-        df.dropna(subset=["Data emplacamento", "Ano", "Marca", "Segmento", "NO_CIDADE"], inplace=True)
+        
+        # Tratar valores NaN em Ano e Mes antes de converter para int
+        # Remover linhas com Ano ou Mes inválidos
+        df = df.dropna(subset=["Ano", "Mes"])
+        
+        # Converter para int com segurança
         df["Ano"] = df["Ano"].astype(int)
-
+        df["Mes"] = df["Mes"].astype(int)
+        
+        # Criar AnoMesStr com segurança (apenas para linhas com data válida)
+        df["AnoMesStr"] = df["Data emplacamento"].dt.strftime("%Y-%m")
+        
+        # Criar AnoMesNum com segurança
+        # Primeiro criar uma string temporária e depois converter para int
+        df["AnoMesTemp"] = df["Ano"].astype(str) + df["Mes"].apply(lambda x: f"{x:02d}")
+        df["AnoMesNum"] = df["AnoMesTemp"].astype(int)
+        df = df.drop(columns=["AnoMesTemp"])  # Remover coluna temporária
+        
+        # Remover linhas onde outras colunas essenciais são inválidas
+        df = df.dropna(subset=["Marca", "Segmento", "NO_CIDADE", "CNPJ CLIENTE", "NOME DO CLIENTE"])
+        
+        # Verificar se ainda temos dados após a limpeza
+        if df.empty:
+            st.error("Após remover linhas com dados inválidos, não restaram registros para análise.")
+            return None
+            
         return df
     except FileNotFoundError:
         st.error(f"Erro: Arquivo Excel padrão não encontrado em {DEFAULT_EXCEL_FILE}. Faça o upload de um arquivo.")
@@ -156,23 +190,25 @@ def calculate_next_purchase_prediction(valid_purchase_dates):
         delta = relativedelta(valid_purchase_dates[i], valid_purchase_dates[i-1])
         months_diff = delta.years * 12 + delta.months
         days_diff = delta.days
+        # Considerar intervalo mínimo de 1 mês, mesmo que dias sejam > 0
         if months_diff > 0:
             intervals_months.append(months_diff)
-        elif months_diff == 0 and days_diff > 0:
+        elif months_diff == 0 and days_diff > 15: # Se mais de 15 dias, conta como ~0.5 mês
              intervals_months.append(0.5)
+        # Ignorar intervalos muito curtos (menos de 15 dias)
 
     if not intervals_months:
          return "Previsão não disponível (compras muito próximas ou única).", last_purchase_date
 
     avg_interval_months = sum(intervals_months) / len(intervals_months)
-    if avg_interval_months < 1:
-        avg_interval_months = 1
+    # Definir um intervalo mínimo razoável (ex: 1 mês)
+    avg_interval_months = max(1, avg_interval_months)
 
     predicted_next_date = last_purchase_date + relativedelta(months=int(round(avg_interval_months)))
 
     meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
     predicted_month_year = f"{meses[predicted_next_date.month - 1]} de {predicted_next_date.year}"
-    prediction_text = f"Próxima compra provável em: **{predicted_month_year}**"
+    prediction_text = f"Próxima compra provável em: **{predicted_month_year}** (intervalo médio: {avg_interval_months:.1f} meses)"
 
     return prediction_text, predicted_next_date
 
@@ -192,25 +228,105 @@ def get_sales_pitch(last_purchase_date, predicted_next_date, total_purchases):
         days_to_next = relativedelta(predicted_next_date, today).days
         predicted_month_year = f"{["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][predicted_next_date.month - 1]} de {predicted_next_date.year}"
 
-        if months_to_next < 0 or (months_to_next == 0 and days_to_next < 0):
-            return f"🚨 **Atenção!** A compra prevista para **{predicted_month_year}** pode estar próxima ou já passou! Última compra em {last_purchase_str}. Contato urgente!"
-        elif months_to_next <= 2:
+        if months_to_next < 0 or (months_to_next == 0 and days_to_next < -7): # Já passou há mais de uma semana
+            return f"🚨 **Atenção!** A compra prevista para **{predicted_month_year}** pode ter passado! Última compra em {last_purchase_str}. Contato urgente!"
+        elif months_to_next <= 1 and days_to_next >= -7: # Próximo mês ou já passou há poucos dias
             return f"📈 **Oportunidade Quente!** Próxima compra prevista para **{predicted_month_year}**. Ótimo momento para contato! Última compra em {last_purchase_str}."
-        elif months_to_next <= 6:
+        elif months_to_next <= 3:
             return f"🗓️ **Planeje-se!** Próxima compra prevista para **{predicted_month_year}**. Prepare sua abordagem! Última compra em {last_purchase_str}."
         else:
             return f"⏳ Compra prevista para **{predicted_month_year}**. Mantenha o relacionamento aquecido! Última compra em {last_purchase_str}."
     else:
+        # Sem previsão, usar tempo desde a última compra
         if months_since_last >= 18:
-            return f"🚨 Alerta de sumiço! Faz {months_since_last} meses desde a última compra ({last_purchase_str}). Hora de reativar esse cliente! 📞"
+            return f"🚨 Alerta de inatividade! Faz {months_since_last} meses desde a última compra ({last_purchase_str}). Hora de reativar esse cliente! 📞"
         elif months_since_last >= 12:
-            return f"👀 E aí, sumido! Faz {months_since_last} meses desde a última compra ({last_purchase_str}). Que tal um alô para esse cliente?"
+            return f"👀 Faz {months_since_last} meses desde a última compra ({last_purchase_str}). Que tal um contato para mostrar novidades?"
         elif months_since_last >= 6:
-            return f"⏳ Já se passaram {months_since_last} meses... ({last_purchase_str}). Bom momento para um follow-up e mostrar as novidades!"
+            return f"⏳ Já se passaram {months_since_last} meses ({last_purchase_str}). Bom momento para um follow-up."
         elif total_purchases > 3:
              return f"👍 Cliente fiel ({total_purchases} compras)! Última compra em {last_purchase_str}. Mantenha o bom trabalho!"
         else:
             return f"✅ Compra recente ({last_purchase_str}). Ótimo para fortalecer o relacionamento!"
+
+# --- Gerenciamento de Estado e Carregamento de Dados ---
+
+# Inicializar estado da sessão se necessário
+if "df_loaded" not in st.session_state:
+    st.session_state.df_loaded = None # Armazena o DataFrame carregado
+if "data_source_key" not in st.session_state:
+    st.session_state.data_source_key = None # Chave para identificar a fonte (default ou upload)
+if "last_upload_info" not in st.session_state:
+    st.session_state.last_upload_info = None # Guarda nome e tamanho do último upload
+
+st.sidebar.header("Atualizar Dados")
+uploaded_file = st.sidebar.file_uploader("Selecione o arquivo Excel (.xlsx)", type=["xlsx"], key="file_uploader")
+
+load_from_default = False
+load_from_upload = False
+
+# Lógica de decisão para carregar/recarregar dados
+if uploaded_file is not None:
+    # Novo upload detectado
+    current_upload_info = (uploaded_file.name, uploaded_file.size)
+    if current_upload_info != st.session_state.last_upload_info:
+        # É um arquivo diferente do último upload ou o primeiro upload
+        load_from_upload = True
+        st.session_state.last_upload_info = current_upload_info
+        st.sidebar.info(f"Arquivo 	'{uploaded_file.name}'	 selecionado.")
+    elif st.session_state.df_loaded is None:
+        # Mesmo arquivo, mas DataFrame não está carregado (ex: após erro)
+        load_from_upload = True
+elif st.session_state.df_loaded is None:
+    # Nenhum upload ativo e nenhum DataFrame carregado, tentar carregar do default
+    load_from_default = True
+
+# Executar o carregamento se necessário
+data_loaded_successfully = False
+if load_from_upload:
+    try:
+        uploaded_content = BytesIO(uploaded_file.getvalue())
+        st.session_state.df_loaded = load_data(uploaded_content)
+        if st.session_state.df_loaded is not None:
+            st.session_state.data_source_key = f"upload_{uploaded_file.name}_{uploaded_file.size}"
+            st.sidebar.success("Dados do arquivo carregado!")
+            data_loaded_successfully = True
+            st.rerun() # Força recarregar a UI com os novos dados
+        else:
+            st.session_state.data_source_key = None # Falha no carregamento
+            st.session_state.last_upload_info = None # Resetar info do upload
+    except Exception as e:
+        st.sidebar.error(f"Erro ao processar upload: {e}")
+        st.session_state.df_loaded = None
+        st.session_state.data_source_key = None
+        st.session_state.last_upload_info = None
+
+elif load_from_default:
+    if os.path.exists(DEFAULT_EXCEL_FILE):
+        try:
+            st.session_state.df_loaded = load_data(DEFAULT_EXCEL_FILE)
+            if st.session_state.df_loaded is not None:
+                st.session_state.data_source_key = "default"
+                st.sidebar.info(f"Usando arquivo padrão: {os.path.basename(DEFAULT_EXCEL_FILE)}")
+                data_loaded_successfully = True
+                # Não precisa de rerun aqui, pois é o carregamento inicial
+            else:
+                st.session_state.data_source_key = None # Falha no carregamento
+        except Exception as e:
+            st.sidebar.error(f"Erro ao carregar arquivo padrão: {e}")
+            st.session_state.df_loaded = None
+            st.session_state.data_source_key = None
+    else:
+        st.sidebar.warning(f"Arquivo padrão não encontrado em {DEFAULT_EXCEL_FILE}. Faça upload de um arquivo.")
+        st.session_state.df_loaded = None
+        st.session_state.data_source_key = None
+
+# Verificar se temos um DataFrame para trabalhar
+df_full = st.session_state.get("df_loaded")
+
+if df_full is None or df_full.empty:
+    st.warning("Nenhum dado carregado. Faça o upload de um arquivo Excel ou verifique o arquivo padrão.")
+    st.stop() # Interrompe a execução se não houver dados
 
 # --- Interface Principal --- 
 
@@ -227,95 +343,17 @@ with col2_header:
 
 st.divider()
 
-# --- Upload e Carregamento de Dados (NOVA LÓGICA DE PERSISTÊNCIA) ---
-st.sidebar.header("Atualizar Dados")
-uploaded_file = st.sidebar.file_uploader("Selecione o arquivo Excel (.xlsx)", type=["xlsx"], key="file_uploader")
-
-# Inicializar estado da sessão
-if "dataframe" not in st.session_state:
-    st.session_state["dataframe"] = None
-if "data_source_info" not in st.session_state: # Armazena info sobre a fonte (nome do arquivo ou 'default')
-    st.session_state["data_source_info"] = None
-if "uploaded_file_content" not in st.session_state: # Armazena o CONTEÚDO do arquivo carregado
-    st.session_state["uploaded_file_content"] = None
-
-needs_reload = False
-data_to_process = None
-current_source_info = None
-
-# 1. Verificar se um NOVO arquivo foi carregado
-if uploaded_file is not None:
-    uploaded_content = BytesIO(uploaded_file.getvalue())
-    uploaded_info = f"uploaded_{uploaded_file.name}_{uploaded_file.size}"
-    
-    if uploaded_info != st.session_state.get("data_source_info"):
-        st.session_state["uploaded_file_content"] = uploaded_content
-        st.session_state["data_source_info"] = uploaded_info
-        data_to_process = st.session_state["uploaded_file_content"]
-        needs_reload = True
-        st.sidebar.success(f"Arquivo 	'{uploaded_file.name}'	 pronto para carregar.")
-    else:
-        data_to_process = st.session_state["uploaded_file_content"]
-        current_source_info = st.session_state["data_source_info"]
-        if st.session_state.get("dataframe") is None:
-            needs_reload = True
-
-# 2. Se nenhum arquivo foi carregado, decidir qual usar
-else:
-    if st.session_state.get("uploaded_file_content") is not None:
-        data_to_process = st.session_state["uploaded_file_content"]
-        current_source_info = st.session_state["data_source_info"]
-        if st.session_state.get("dataframe") is None:
-            needs_reload = True
-            st.sidebar.info("Usando arquivo carregado anteriormente.")
-    elif os.path.exists(DEFAULT_EXCEL_FILE):
-        data_to_process = DEFAULT_EXCEL_FILE
-        current_source_info = "default"
-        if st.session_state.get("data_source_info") != "default":
-            st.session_state["uploaded_file_content"] = None
-            st.session_state["data_source_info"] = "default"
-            needs_reload = True
-            st.sidebar.info(f"Usando arquivo padrão: {os.path.basename(DEFAULT_EXCEL_FILE)}")
-        elif st.session_state.get("dataframe") is None:
-             needs_reload = True
-             st.sidebar.info(f"Usando arquivo padrão: {os.path.basename(DEFAULT_EXCEL_FILE)}")
-    else:
-        st.error("Nenhum arquivo de dados disponível. Faça o upload de um arquivo Excel ou certifique-se que o arquivo padrão existe.")
-        st.stop()
-
-# 3. Carregar os dados se necessário
-if needs_reload and data_to_process is not None:
-    # Rebobinar o BytesIO antes de ler novamente
-    if isinstance(data_to_process, BytesIO):
-        data_to_process.seek(0)
-    st.session_state["dataframe"] = load_data(data_to_process)
-    if st.session_state["dataframe"] is not None:
-        st.sidebar.success("Dados carregados/atualizados!")
-        st.rerun() # Força o rerender para UI refletir a mudança
-    else:
-        st.sidebar.error("Falha ao carregar/atualizar dados.")
-        st.session_state["dataframe"] = None
-        st.session_state["data_source_info"] = None
-        st.session_state["uploaded_file_content"] = None
-
-# Usar o dataframe do estado da sessão
-df_full = st.session_state.get("dataframe")
-
-if df_full is None or df_full.empty:
-    st.warning("Os dados não puderam ser carregados ou estão vazios. Verifique o arquivo ou a mensagem de erro acima.")
-    st.stop()
-
-# --- Barra de Busca e Filtros --- 
+# --- Barra de Busca e Filtros (MOVIMENTADO PARA CIMA) --- 
 st.subheader("Buscar Cliente Específico")
 search_query = st.text_input("Digite o Nome ou CNPJ do cliente:", "", key="search_input")
 search_button = st.button("Buscar", key="search_button")
 
 st.sidebar.header("Filtros Gerais (Afetam Busca e Resumo)")
 all_brands = sorted(df_full["Marca"].dropna().unique())
-selected_brands = st.sidebar.multiselect("Filtrar por Marca:", all_brands)
+selected_brands = st.sidebar.multiselect("Filtrar por Marca:", all_brands, key="brand_filter")
 
 all_segments = sorted(df_full["Segmento"].dropna().unique())
-selected_segments = st.sidebar.multiselect("Filtrar por Segmento:", all_segments)
+selected_segments = st.sidebar.multiselect("Filtrar por Segmento:", all_segments, key="segment_filter")
 
 # Aplicar filtros ao DataFrame principal ANTES de qualquer cálculo
 df_display = df_full.copy()
@@ -324,17 +362,19 @@ if selected_brands:
 if selected_segments:
     df_display = df_display[df_display["Segmento"].isin(selected_segments)]
 
-# --- Exibição dos Resultados da Busca --- 
+# --- Exibição dos Resultados da Busca ou Resumo Geral --- 
 st.divider()
 
 if search_button and search_query:
-    st.markdown(f"### Resultados da Busca por: '{search_query}'")
-    query_normalized = ''.join(filter(str.isdigit, str(search_query)))
+    # --- Resultados da Busca Específica ---
+    st.markdown(f"### Resultados da Busca por: 	'{search_query}'")
+    query_normalized = 	''.join(filter(str.isdigit, str(search_query)))
 
     mask = (
         df_display["NOME DO CLIENTE"].str.contains(search_query, case=False, na=False)
     )
-    if query_normalized and len(query_normalized) > 5:
+    # Só busca por CNPJ normalizado se a query tiver dígitos
+    if query_normalized:
          mask = mask | df_display["CNPJ_NORMALIZED"].str.contains(query_normalized, case=False, na=False)
 
     results_df = df_display[mask]
@@ -345,168 +385,159 @@ if search_button and search_query:
         unique_cnpjs = results_df["CNPJ_NORMALIZED"].unique()
 
         if len(unique_cnpjs) > 1:
-            st.info(f"Múltiplos clientes encontrados para \"{search_query}\". Exibindo o primeiro encontrado: {results_df.iloc[0]['NOME DO CLIENTE']} ({results_df.iloc[0]['CNPJ CLIENTE']}).")
+            # Se múltiplos CNPJs, pegar o primeiro como referência (pode precisar de lógica mais sofisticada)
             target_cnpj_normalized = unique_cnpjs[0]
+            first_match_name = results_df[results_df["CNPJ_NORMALIZED"] == target_cnpj_normalized]["NOME DO CLIENTE"].iloc[0]
+            first_match_cnpj = results_df[results_df["CNPJ_NORMALIZED"] == target_cnpj_normalized]["CNPJ CLIENTE"].iloc[0]
+            st.info(f"Múltiplos clientes encontrados para \"{search_query}\". Exibindo resultados para: **{first_match_name} ({first_match_cnpj})**.")
         elif len(unique_cnpjs) == 1:
             target_cnpj_normalized = unique_cnpjs[0]
         else:
+             # Caso estranho: máscara funcionou mas não achou CNPJ (não deveria acontecer com dropna)
              st.warning("Não foi possível identificar um CNPJ único para o cliente.")
              st.stop()
 
-        client_df = results_df[results_df["CNPJ_NORMALIZED"] == target_cnpj_normalized].copy()
+        # Filtrar DataFrame para o CNPJ alvo
+        client_df = df_display[df_display["CNPJ_NORMALIZED"] == target_cnpj_normalized].copy()
 
         if not client_df.empty:
             client_df_sorted = client_df.sort_values(by="Data emplacamento", ascending=False)
             latest_record = client_df_sorted.iloc[0]
 
+            # Informações básicas do cliente
             client_name = latest_record["NOME DO CLIENTE"]
             client_cnpj_formatted = latest_record["CNPJ CLIENTE"]
-            city_str = latest_record["NO_CIDADE"] if "NO_CIDADE" in latest_record and pd.notna(latest_record["NO_CIDADE"]) else "N/A"
-            client_address = latest_record[NOME_COLUNA_ENDERECO]
-            client_phone = latest_record[NOME_COLUNA_TELEFONE]
+            client_address = latest_record.get(NOME_COLUNA_ENDERECO, "N/A")
+            client_phone = latest_record.get(NOME_COLUNA_TELEFONE, "N/A")
+            client_city = latest_record.get("NO_CIDADE", "N/A")
 
-            total_plated = len(client_df)
-            last_plate_date_obj = client_df["Data emplacamento"].dropna().max()
-            last_plate_date_str = last_plate_date_obj.strftime("%d/%m/%Y") if pd.notna(last_plate_date_obj) else "N/A"
-            most_frequent_model = get_modes(client_df["Modelo"])
-            most_frequent_brand = get_modes(client_df["Marca"])
-            most_frequent_segment = get_modes(client_df["Segmento"])
-            most_frequent_dealer = get_modes(client_df["Concessionário"])
-
-            st.markdown(f"#### Detalhes de: {client_name}")
-
+            st.subheader(f"Detalhes de: {client_name}")
             col1_info, col2_info = st.columns(2)
             with col1_info:
-                st.markdown(f'<div class="info-card"><span class="label">Nome do Cliente:</span><span class="value">{client_name}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">CNPJ:</span><span class="value">{client_cnpj_formatted}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Endereço:</span><span class="value">{client_address}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Modelo(s) Mais Comprado(s):</span><span class="value">{format_list(most_frequent_model)}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Concessionária(s) Mais Frequente(s):</span><span class="value">{format_list(most_frequent_dealer)}</span></div>', unsafe_allow_html=True)
-
+                st.markdown(f"<div class='info-card'><span class='label'>CNPJ:</span><span class='value'>{client_cnpj_formatted}</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='info-card'><span class='label'>Endereço:</span><span class='value'>{client_address}</span></div>", unsafe_allow_html=True)
             with col2_info:
-                st.markdown(f'<div class="info-card"><span class="label">Cidade:</span><span class="value">{city_str}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Telefone:</span><span class="value">{client_phone}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Total Emplacado (na base):</span><span class="value">{total_plated}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Último Emplacamento:</span><span class="value">{last_plate_date_str}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Marca(s) Mais Comprada(s):</span><span class="value">{format_list(most_frequent_brand)}</span></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-card"><span class="label">Segmento(s) Mais Comprado(s):</span><span class="value">{format_list(most_frequent_segment)}</span></div>', unsafe_allow_html=True)
+                st.markdown(f"<div class='info-card'><span class='label'>Cidade:</span><span class='value'>{client_city}</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='info-card'><span class='label'>Telefone:</span><span class='value'>{client_phone}</span></div>", unsafe_allow_html=True)
 
-            st.divider()
+            st.markdown("#### Análise e Histórico")
 
-            # --- Previsão e Insight (MOVENDO PARA CIMA DO GRÁFICO) ---
-            st.markdown("#### Previsão e Insight de Vendas")
-            valid_dates = client_df["Data emplacamento"].dropna().tolist()
-            prediction_text, predicted_date_obj = calculate_next_purchase_prediction(valid_dates)
-            sales_pitch = get_sales_pitch(last_plate_date_obj, predicted_date_obj, total_plated)
-            
-            col_pred, col_insight = st.columns(2)
-            with col_pred:
-                st.info(prediction_text)
-            with col_insight:
-                st.success(f"💡 {sales_pitch}")
+            # Cálculos para análise
+            total_purchases = len(client_df_sorted)
+            first_purchase_date = client_df_sorted["Data emplacamento"].min()
+            last_purchase_date = client_df_sorted["Data emplacamento"].max()
+            valid_purchase_dates = client_df_sorted["Data emplacamento"].dropna().tolist()
+
+            # Calcular previsão e pitch
+            prediction_text, predicted_next_date = calculate_next_purchase_prediction(valid_purchase_dates)
+            sales_pitch = get_sales_pitch(last_purchase_date, predicted_next_date, total_purchases)
+
+            # Exibir Insight e Previsão (MOVIMENTADO PARA CIMA)
+            col1_insight, col2_predict = st.columns(2)
+            with col1_insight:
+                 st.markdown(f"**Insight de Vendas:**")
+                 st.info(sales_pitch)
+            with col2_predict:
+                 st.markdown(f"**Previsão de Próxima Compra:**")
+                 st.info(prediction_text)
+
+            # Métricas Resumidas do Cliente
+            col1_metric, col2_metric, col3_metric = st.columns(3)
+            col1_metric.metric("Total de Emplacamentos", total_purchases)
+            col2_metric.metric("Primeira Compra", first_purchase_date.strftime("%d/%m/%Y") if pd.notna(first_purchase_date) else "N/A")
+            col3_metric.metric("Última Compra", last_purchase_date.strftime("%d/%m/%Y") if pd.notna(last_purchase_date) else "N/A")
+
+            # Histórico de Compras
+            st.markdown("##### Histórico de Emplacamentos")
+            client_df_display = client_df_sorted[["Data emplacamento", "Marca", "Modelo", "Segmento"]].rename(columns={
+                "Data emplacamento": "Data",
+                "Marca": "Marca",
+                "Modelo": "Modelo",
+                "Segmento": "Segmento"
+            })
+            client_df_display["Data"] = client_df_display["Data"].dt.strftime("%d/%m/%Y")
+            st.dataframe(client_df_display, use_container_width=True)
+
+            # Gráfico de Frequência de Compra
+            if total_purchases > 1:
+                st.markdown("##### Frequência de Compra (por Mês/Ano)")
+                purchase_frequency = client_df_sorted.groupby("AnoMesStr").size().reset_index(name="Count")
+                # Garantir que AnoMesNum existe e é int antes de ordenar
+                if "AnoMesNum" in purchase_frequency.columns:
+                    purchase_frequency["AnoMesNum"] = purchase_frequency["AnoMesNum"].astype(int)
+                    purchase_frequency = purchase_frequency.sort_values("AnoMesNum")
                 
-            st.markdown("#### Histórico de Compras")
-            # Preparar dados para o gráfico
-            client_df['AnoMesStr'] = client_df['Data emplacamento'].dt.strftime("%Y-%m") # Usar string para eixo X
-            purchase_history = client_df.groupby('AnoMesStr').size().reset_index(name='Quantidade')
-            # purchase_history['AnoMesStr'] = purchase_history['AnoMesStr'].astype(str) # Já é string
-
-            if not purchase_history.empty:
-                fig = px.bar(purchase_history, x='AnoMesStr', y='Quantidade', title=f'Histórico de Compras de {client_name}',
-                             labels={'AnoMesStr': 'Mês/Ano', 'Quantidade': 'Nº de Emplacamentos'},
-                             color_discrete_sequence=px.colors.qualitative.Pastel)
-                fig.update_layout(xaxis_title="Período", yaxis_title="Quantidade Emplacada")
-                st.plotly_chart(fig, use_container_width=True)
+                fig_freq = px.bar(purchase_frequency, x="AnoMesStr", y="Count", title="Emplacamentos ao Longo do Tempo", labels={'AnoMesStr': 'Mês/Ano', 'Count': 'Qtd. Emplacamentos'})
+                fig_freq.update_layout(xaxis_title="", yaxis_title="Quantidade")
+                st.plotly_chart(fig_freq, use_container_width=True)
             else:
-                st.warning("Não há histórico de compras suficiente para gerar gráfico.")
+                st.info("Gráfico de frequência não disponível (apenas uma compra registrada).")
+
+            # Análise de Preferências
+            st.markdown("##### Preferências do Cliente")
+            pref_cols = st.columns(3)
+            preferred_brands = get_modes(client_df["Marca"])
+            preferred_segments = get_modes(client_df["Segmento"])
+            preferred_models = get_modes(client_df["Modelo"])
+
+            pref_cols[0].metric("Marca(s) Preferida(s)", format_list(preferred_brands))
+            pref_cols[1].metric("Segmento(s) Preferido(s)", format_list(preferred_segments))
+            pref_cols[2].metric("Modelo(s) Preferido(s)", format_list(preferred_models))
+
         else:
-            st.warning("Cliente encontrado, mas sem registros de emplacamento válidos.")
-elif search_button and not search_query:
-    st.warning("Por favor, digite um nome ou CNPJ para buscar.")
+            # Isso não deve acontecer se results_df não estava vazio e o CNPJ foi identificado
+            st.error("Erro inesperado ao filtrar os dados do cliente.")
 else:
-    # --- RESUMO GERAL E ANÁLISES DE MERCADO (SE NENHUMA BUSCA FOI FEITA) --- 
-    st.divider()
-    st.subheader("Resumo Geral e Análise de Mercado - VANS (Considerando Filtros)")
+    # --- Resumo Geral (se nenhuma busca ativa) ---
+    st.subheader("Resumo Geral da Base de Dados")
+    st.markdown("*(Considerando os filtros aplicados na barra lateral, se houver)*")
 
-    # Calcular estatísticas gerais do df_display (DataFrame filtrado)
-    total_emplacamentos_display = len(df_display)
-    total_clientes_unicos_display = df_display["CNPJ_NORMALIZED"].nunique()
-    
-    if not df_display.empty:
-        primeiro_ano_display = int(df_display["Ano"].min())
-        ultimo_ano_display = int(df_display["Ano"].max())
+    if df_display.empty:
+        st.warning("Nenhum dado disponível para exibir com os filtros selecionados.")
     else:
-        primeiro_ano_display = "N/A"
-        ultimo_ano_display = "N/A"
+        # Métricas Gerais
+        total_emplacamentos = len(df_display)
+        total_clientes = df_display["CNPJ_NORMALIZED"].nunique()
+        data_inicio = df_display["Data emplacamento"].min()
+        data_fim = df_display["Data emplacamento"].max()
 
-    col_resumo1, col_resumo2, col_resumo3 = st.columns(3)
-    with col_resumo1:
-        st.metric(label="Total de Emplacamentos (Filtro)", value=f"{total_emplacamentos_display:,}".replace(",", "."))
-    with col_resumo2:
-        st.metric(label="Total de Clientes Únicos (Filtro)", value=f"{total_clientes_unicos_display:,}".replace(",", "."))
-    with col_resumo3:
-        st.metric(label="Período Coberto (Filtro)", value=f"{primeiro_ano_display} - {ultimo_ano_display}")
+        col1_res, col2_res, col3_res = st.columns(3)
+        col1_res.metric("Total de Emplacamentos", total_emplacamentos)
+        col2_res.metric("Clientes Únicos", total_clientes)
+        col3_res.metric("Período Coberto", f"{data_inicio.strftime('%m/%Y') if pd.notna(data_inicio) else 'N/A'} a {data_fim.strftime('%m/%Y') if pd.notna(data_fim) else 'N/A'}")
 
-    st.divider()
-    st.markdown("#### Análises de Mercado (VANS)")
-
-    if not df_display.empty:
-        # 1. Tendências Gerais (por Mês/Ano)
-        st.markdown("##### 1. Tendência Geral de Emplacamentos (Mês/Ano)")
-        tendencia_mes_ano = df_display.groupby('AnoMesStr').size().reset_index(name='Quantidade')
-        tendencia_mes_ano = tendencia_mes_ano.sort_values('AnoMesStr') # Ordenar por data
-        if not tendencia_mes_ano.empty:
-            fig_tendencia = px.line(tendencia_mes_ano, x='AnoMesStr', y='Quantidade', 
-                                    title="Emplacamentos de VANS ao Longo do Tempo",
-                                    labels={'AnoMesStr': 'Mês/Ano', 'Quantidade': 'Nº de Emplacamentos'})
-            fig_tendencia.update_layout(xaxis_title="Período", yaxis_title="Quantidade Emplacada")
-            st.plotly_chart(fig_tendencia, use_container_width=True)
+        st.markdown("#### Emplacamentos por Ano")
+        # Garantir que não há NaN em Ano antes de agrupar
+        emplac_por_ano = df_display.dropna(subset=["Ano"]).groupby("Ano").size().reset_index(name="Count")
+        if not emplac_por_ano.empty:
+            emplac_por_ano["Ano"] = emplac_por_ano["Ano"].astype(int)  # Garantir que Ano é int
+            fig_ano = px.bar(emplac_por_ano, x="Ano", y="Count", title="Total de Emplacamentos por Ano", labels={'Ano': 'Ano', 'Count': 'Quantidade'})
+            fig_ano.update_layout(xaxis_type='category') # Tratar ano como categoria
+            st.plotly_chart(fig_ano, use_container_width=True)
         else:
-            st.info("Não há dados suficientes para exibir a tendência mensal.")
+            st.info("Não há dados suficientes para gerar o gráfico de emplacamentos por ano.")
 
-        # 2. Market Share por Marca
-        st.markdown("##### 2. Market Share por Marca")
-        market_share_marca = df_display['Marca'].value_counts().reset_index(name='Quantidade')
-        market_share_marca.columns = ['Marca', 'Quantidade']
-        if not market_share_marca.empty:
-            fig_share = px.pie(market_share_marca, names='Marca', values='Quantidade', 
-                               title="Participação de Mercado por Marca de VAN",
-                               hole=0.3) # Gráfico de rosca
-            fig_share.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig_share, use_container_width=True)
+        st.markdown("#### Emplacamentos por Marca e Ano")
+        # Garantir que não há NaN em Ano ou Marca antes de agrupar
+        emplac_marca_ano = df_display.dropna(subset=["Ano", "Marca"]).groupby(["Ano", "Marca"]).size().reset_index(name="Count")
+        if not emplac_marca_ano.empty:
+            emplac_marca_ano["Ano"] = emplac_marca_ano["Ano"].astype(int)  # Garantir que Ano é int
+            
+            # Pivotar para formato wide
+            try:
+                pivot_marca_ano = emplac_marca_ano.pivot(index="Marca", columns="Ano", values="Count").fillna(0).astype(int)
+                # Adicionar total por marca
+                pivot_marca_ano["Total"] = pivot_marca_ano.sum(axis=1)
+                # Ordenar pelo total
+                pivot_marca_ano = pivot_marca_ano.sort_values("Total", ascending=False)
+                st.dataframe(pivot_marca_ano, use_container_width=True)
+            except Exception as pivot_error:
+                st.warning(f"Não foi possível gerar a tabela de emplacamentos por marca e ano: {pivot_error}")
         else:
-            st.info("Não há dados suficientes para exibir o market share por marca.")
-
-        # 3. Distribuição Geográfica por Cidade (Tabela Top 15)
-        st.markdown("##### 3. Distribuição Geográfica (Top 15 Cidades)")
-        dist_cidade = df_display['NO_CIDADE'].value_counts().reset_index(name='Quantidade')
-        dist_cidade.columns = ['Cidade', 'Quantidade']
-        if not dist_cidade.empty:
-            st.dataframe(dist_cidade.head(15), use_container_width=True)
-        else:
-            st.info("Não há dados suficientes para exibir a distribuição por cidade.")
-
-        # 4. Análise por Segmento
-        st.markdown("##### 4. Análise por Segmento")
-        analise_segmento = df_display['Segmento'].value_counts().reset_index(name='Quantidade')
-        analise_segmento.columns = ['Segmento', 'Quantidade']
-        if not analise_segmento.empty:
-            fig_segmento = px.bar(analise_segmento, x='Segmento', y='Quantidade', 
-                                  title="Emplacamentos por Segmento de VAN",
-                                  labels={'Segmento': 'Segmento', 'Quantidade': 'Nº de Emplacamentos'},
-                                  color='Segmento')
-            st.plotly_chart(fig_segmento, use_container_width=True)
-        else:
-            st.info("Não há dados suficientes para exibir a análise por segmento.")
-
-    else:
-        st.info("Não há dados para exibir as análises de mercado com os filtros aplicados.")
+            st.info("Não há dados suficientes para gerar a tabela de emplacamentos por marca e ano.")
 
 # --- Rodapé (Opcional) ---
 st.sidebar.divider()
 if os.path.exists(LOGO_WHITE_PATH):
-    st.sidebar.image(LOGO_WHITE_PATH, use_container_width=True)
-else:
-    st.sidebar.warning("Logo branco não encontrado.")
-st.sidebar.caption("© De Nigris Distribuidora")
-
+    st.sidebar.image(LOGO_WHITE_PATH, width=150)
+st.sidebar.markdown("© De Nigris Distribuidora")
