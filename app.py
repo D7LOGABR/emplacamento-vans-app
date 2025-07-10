@@ -78,6 +78,7 @@ NOME_COLUNA_CONCESSIONARIO = "CONCESSIONÁRIO"  # Ajuste conforme seu Excel
 def load_data(file_path_or_buffer):
     try:
         df = pd.read_excel(file_path_or_buffer)
+
         if df.empty:
             st.error("O arquivo Excel não contém dados.")
             return None
@@ -88,12 +89,13 @@ def load_data(file_path_or_buffer):
             st.error(f"Erro: Colunas essenciais não encontradas: {', '.join(missing_cols)}")
             return None
 
-        # --- MELHORIA: Busca por PLACA robusta ---
-        if "PLACA" in df.columns:
-            df["PLACA"] = df["PLACA"].astype(str).str.strip().str.upper()
-            df["PLACA_NORMALIZED"] = df["PLACA"].str.replace("-", "").str.replace(" ", "").str.upper()
+        # --- MELHORIA: Normalização da coluna PLACA (coluna M) ---
+        placa_col = "PLACA"
+        if placa_col in df.columns:
+            df[placa_col] = df[placa_col].astype(str).str.strip().str.upper()
+            df["PLACA_NORMALIZED"] = df[placa_col].str.replace("-", "").str.replace(" ", "").str.upper()
         else:
-            df["PLACA"] = "N/A"
+            df[placa_col] = ""
             df["PLACA_NORMALIZED"] = ""
 
         # --- MELHORIA: Normalização da coluna Concessionário ---
@@ -269,7 +271,6 @@ with col2_header:
 
 st.divider()
 
-# --- MELHORIA: Busca por PLACA incluída ---
 st.subheader("Buscar Cliente, Placa ou CNPJ")
 search_query = st.text_input("Digite o Nome, CNPJ ou Placa do cliente:", "", key="search_input")
 search_button = st.button("Buscar", key="search_button")
@@ -371,7 +372,6 @@ if search_button and search_query:
             if "Data" in client_df_display.columns:
                 client_df_display["Data"] = pd.to_datetime(client_df_display["Data"], errors="coerce").dt.strftime("%d/%m/%Y")
             st.dataframe(client_df_display, use_container_width=True)
-            # ... (restante igual)
         else:
             st.error("Erro inesperado ao filtrar os dados do cliente.")
 else:
@@ -388,7 +388,28 @@ else:
         col1_res.metric("Total de Emplacamentos", total_emplacamentos)
         col2_res.metric("Clientes Únicos", total_clientes)
         col3_res.metric("Período Coberto", f"{data_inicio.strftime('%m/%Y') if pd.notna(data_inicio) else 'N/A'} a {data_fim.strftime('%m/%Y') if pd.notna(data_fim) else 'N/A'}")
-        # ... (restante igual)
+        st.markdown("#### Emplacamentos por Ano")
+        emplac_por_ano = df_display.dropna(subset=["Ano"]).groupby("Ano").size().reset_index(name="Count")
+        if not emplac_por_ano.empty:
+            emplac_por_ano["Ano"] = emplac_por_ano["Ano"].astype(int)
+            fig_ano = px.bar(emplac_por_ano, x="Ano", y="Count", title="Total de Emplacamentos por Ano", labels={'Ano': 'Ano', 'Count': 'Quantidade'})
+            fig_ano.update_layout(xaxis_type='category')
+            st.plotly_chart(fig_ano, use_container_width=True)
+        else:
+            st.info("Não há dados suficientes para gerar o gráfico de emplacamentos por ano.")
+        st.markdown("#### Emplacamentos por Marca e Ano")
+        emplac_marca_ano = df_display.dropna(subset=["Ano", "Marca"]).groupby(["Ano", "Marca"]).size().reset_index(name="Count")
+        if not emplac_marca_ano.empty:
+            emplac_marca_ano["Ano"] = emplac_marca_ano["Ano"].astype(int)
+            try:
+                pivot_marca_ano = emplac_marca_ano.pivot(index="Marca", columns="Ano", values="Count").fillna(0).astype(int)
+                pivot_marca_ano["Total"] = pivot_marca_ano.sum(axis=1)
+                pivot_marca_ano = pivot_marca_ano.sort_values("Total", ascending=False)
+                st.dataframe(pivot_marca_ano, use_container_width=True)
+            except Exception as pivot_error:
+                st.warning(f"Não foi possível gerar a tabela de emplacamentos por marca e ano: {pivot_error}")
+        else:
+            st.info("Não há dados suficientes para gerar a tabela de emplacamentos por marca e ano.")
 
 st.sidebar.divider()
 if os.path.exists(LOGO_WHITE_PATH):
