@@ -9,7 +9,7 @@ from io import BytesIO
 
 # --- Configuração da Página ---
 st.set_page_config(
-    page_title="Emplacamentos VANS Comercial De Nigris",
+    page_title="Emplacamentos VANS De Nigris",
     page_icon="🚚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -265,7 +265,7 @@ with col1_header:
         st.warning("Logo colorido não encontrado.")
 with col2_header:
     st.title("Consulta de Emplacamentos - VANS")
-    st.markdown("**Ferramenta interna Comercial De Nigris** - Busque por cliente, placa ou CNPJ ou veja o resumo geral.")
+    st.markdown("**Ferramenta interna De Nigris** - Busque por cliente, placa ou CNPJ ou veja o resumo geral.")
 
 st.divider()
 
@@ -393,4 +393,4 @@ else:
 st.sidebar.divider()
 if os.path.exists(LOGO_WHITE_PATH):
     st.sidebar.image(LOGO_WHITE_PATH, width=150)
-st.sidebar.markdown("© Comercial De Nigris")
+st.sidebar.markdown("© De Nigris Distribuidora")
