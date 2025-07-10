@@ -7,7 +7,6 @@ import os
 import numpy as np
 from io import BytesIO
 
-# --- Configuração da Página ---
 st.set_page_config(
     page_title="Emplacamentos VANS De Nigris",
     page_icon="🚚",
@@ -15,7 +14,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Estilo CSS Customizado ---
 st.markdown("""
 <style>
     .main .block-container {
@@ -72,13 +70,12 @@ LOGO_WHITE_PATH = os.path.join(DATA_DIR, "logo_denigris_branco.png")
 
 NOME_COLUNA_ENDERECO = "ENDEREÇO COMPLETO"
 NOME_COLUNA_TELEFONE = "TELEFONE1"
-NOME_COLUNA_CONCESSIONARIO = "CONCESSIONÁRIO"  # Ajuste conforme seu Excel
+NOME_COLUNA_CONCESSIONARIO = "CONCESSIONÁRIO"
 
 @st.cache_data(ttl=3600)
 def load_data(file_path_or_buffer):
     try:
         df = pd.read_excel(file_path_or_buffer)
-
         if df.empty:
             st.error("O arquivo Excel não contém dados.")
             return None
@@ -89,7 +86,7 @@ def load_data(file_path_or_buffer):
             st.error(f"Erro: Colunas essenciais não encontradas: {', '.join(missing_cols)}")
             return None
 
-        # --- MELHORIA: Normalização da coluna PLACA (coluna M) ---
+        # Normalização da coluna PLACA (coluna M)
         placa_col = "PLACA"
         if placa_col in df.columns:
             df[placa_col] = df[placa_col].astype(str).str.strip().str.upper()
@@ -98,7 +95,7 @@ def load_data(file_path_or_buffer):
             df[placa_col] = ""
             df["PLACA_NORMALIZED"] = ""
 
-        # --- MELHORIA: Normalização da coluna Concessionário ---
+        # Normalização da coluna Concessionário
         concessionario_variations = ["CONCESSIONÁRIO", "concessionário", "Concessionário", "Concessionaria", "CONCESSIONARIO"]
         found_concessionario_col = next((col for col in concessionario_variations if col in df.columns), None)
         if found_concessionario_col and found_concessionario_col != NOME_COLUNA_CONCESSIONARIO:
@@ -291,89 +288,84 @@ st.divider()
 
 if search_button and search_query:
     st.markdown(f"### Resultados da Busca por: '{search_query}'")
-    query_normalized = ''.join(filter(str.isdigit, str(search_query)))
     query_placa_normalized = search_query.replace("-", "").replace(" ", "").upper()
-    mask = (
-        df_display["NOME DO CLIENTE"].str.contains(search_query, case=False, na=False)
-    )
-    if query_normalized:
-        mask = mask | df_display["CNPJ_NORMALIZED"].str.contains(query_normalized, case=False, na=False)
-    if query_placa_normalized:
-        mask = mask | df_display["PLACA_NORMALIZED"].str.contains(query_placa_normalized, case=False, na=False)
-    results_df = df_display[mask]
-    if results_df.empty:
+    query_cnpj_normalized = ''.join(filter(str.isdigit, str(search_query)))
+
+    # Busca exata por placa
+    df_found = df_display[df_display["PLACA_NORMALIZED"] == query_placa_normalized]
+    if df_found.empty and len(query_cnpj_normalized) >= 11:
+        # Busca exata por CNPJ normalizado
+        df_found = df_display[df_display["CNPJ_NORMALIZED"] == query_cnpj_normalized]
+    if df_found.empty:
+        # Busca por nome (parcial, case-insensitive)
+        df_found = df_display[df_display["NOME DO CLIENTE"].str.contains(search_query, case=False, na=False)]
+
+    if df_found.empty:
         st.warning("Cliente ou placa não encontrado na base de dados (considerando os filtros aplicados, se houver).")
     else:
-        unique_cnpjs = results_df["CNPJ_NORMALIZED"].unique()
+        unique_cnpjs = df_found["CNPJ_NORMALIZED"].unique()
         if len(unique_cnpjs) > 1:
-            target_cnpj_normalized = unique_cnpjs[0]
-            first_match_name = results_df[results_df["CNPJ_NORMALIZED"] == target_cnpj_normalized]["NOME DO CLIENTE"].iloc[0]
-            first_match_cnpj = results_df[results_df["CNPJ_NORMALIZED"] == target_cnpj_normalized]["CNPJ CLIENTE"].iloc[0]
-            st.info(f"Múltiplos clientes encontrados para \"{search_query}\". Exibindo resultados para: **{first_match_name} ({first_match_cnpj})**.")
-        elif len(unique_cnpjs) == 1:
-            target_cnpj_normalized = unique_cnpjs[0]
-        else:
-            st.warning("Não foi possível identificar um CNPJ único para o cliente.")
-            st.stop()
-        client_df = df_display[df_display["CNPJ_NORMALIZED"] == target_cnpj_normalized].copy()
-        if not client_df.empty:
-            client_df_sorted = client_df.sort_values(by="Data emplacamento", ascending=False)
-            latest_record = client_df_sorted.iloc[0]
-            client_name = latest_record["NOME DO CLIENTE"]
-            client_cnpj_formatted = latest_record["CNPJ CLIENTE"]
-            client_address = latest_record.get(NOME_COLUNA_ENDERECO, "N/A")
-            client_phone = latest_record.get(NOME_COLUNA_TELEFONE, "N/A")
-            client_city = latest_record.get("NO_CIDADE", "N/A")
-            modelo_mais_comprado = format_list(get_modes(client_df_sorted["Modelo"])) if "Modelo" in client_df_sorted.columns else "N/A"
-            concessionario_mais_frequente = format_list(get_modes(client_df_sorted[NOME_COLUNA_CONCESSIONARIO])) if NOME_COLUNA_CONCESSIONARIO in client_df_sorted.columns else "N/A"
+            cnpj_options = df_found.drop_duplicates('CNPJ_NORMALIZED')[["NOME DO CLIENTE", "CNPJ CLIENTE", "CNPJ_NORMALIZED"]]
+            cnpj_labels = [f"{row['NOME DO CLIENTE']} ({row['CNPJ CLIENTE']})" for idx, row in cnpj_options.iterrows()]
+            cnpj_selected = st.selectbox("Múltiplos clientes encontrados. Selecione o desejado:", options=cnpj_labels)
+            idx_selected = cnpj_labels.index(cnpj_selected)
+            cnpj_escolhido = cnpj_options.iloc[idx_selected]["CNPJ_NORMALIZED"]
+            df_found = df_found[df_found["CNPJ_NORMALIZED"] == cnpj_escolhido]
 
-            st.subheader(f"Detalhes de: {client_name}")
-            col1_info, col2_info = st.columns(2)
-            with col1_info:
-                st.markdown(f"<div class='info-card'><span class='label'>CNPJ:</span><span class='value'>{client_cnpj_formatted}</span></div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='info-card'><span class='label'>Endereço:</span><span class='value'>{client_address}</span></div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='info-card'><span class='label'>Modelo mais comprado:</span><span class='value'>{modelo_mais_comprado}</span></div>", unsafe_allow_html=True)
-            with col2_info:
-                st.markdown(f"<div class='info-card'><span class='label'>Cidade:</span><span class='value'>{client_city}</span></div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='info-card'><span class='label'>Telefone:</span><span class='value'>{client_phone}</span></div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='info-card'><span class='label'>Concessionário mais frequente:</span><span class='value'>{concessionario_mais_frequente}</span></div>", unsafe_allow_html=True)
+        client_df_sorted = df_found.sort_values(by="Data emplacamento", ascending=False)
+        latest_record = client_df_sorted.iloc[0]
+        client_name = latest_record["NOME DO CLIENTE"]
+        client_cnpj_formatted = latest_record["CNPJ CLIENTE"]
+        client_address = latest_record.get(NOME_COLUNA_ENDERECO, "N/A")
+        client_phone = latest_record.get(NOME_COLUNA_TELEFONE, "N/A")
+        client_city = latest_record.get("NO_CIDADE", "N/A")
+        modelo_mais_comprado = format_list(get_modes(client_df_sorted["Modelo"])) if "Modelo" in client_df_sorted.columns else "N/A"
+        concessionario_mais_frequente = format_list(get_modes(client_df_sorted[NOME_COLUNA_CONCESSIONARIO])) if NOME_COLUNA_CONCESSIONARIO in client_df_sorted.columns else "N/A"
 
-            st.markdown("#### Análise e Histórico")
-            total_purchases = len(client_df_sorted)
-            first_purchase_date = client_df_sorted["Data emplacamento"].min()
-            last_purchase_date = client_df_sorted["Data emplacamento"].max()
-            valid_purchase_dates = client_df_sorted["Data emplacamento"].dropna().tolist()
-            prediction_text, predicted_next_date = calculate_next_purchase_prediction(valid_purchase_dates)
-            sales_pitch = get_sales_pitch(last_purchase_date, predicted_next_date, total_purchases)
-            col1_insight, col2_predict = st.columns(2)
-            with col1_insight:
-                st.markdown(f"**Insight de Vendas:**")
-                st.info(sales_pitch)
-            with col2_predict:
-                st.markdown(f"**Previsão de Próxima Compra:**")
-                st.info(prediction_text)
-            col1_metric, col2_metric, col3_metric = st.columns(3)
-            col1_metric.metric("Total de Emplacamentos", total_purchases)
-            col2_metric.metric("Primeira Compra", first_purchase_date.strftime("%d/%m/%Y") if pd.notna(first_purchase_date) else "N/A")
-            col3_metric.metric("Última Compra", last_purchase_date.strftime("%d/%m/%Y") if pd.notna(last_purchase_date) else "N/A")
-            st.markdown("##### Histórico de Emplacamentos")
-            # MELHORIA: agora inclui PLACA e concessionário relacionado ao chassi
-            cols_hist = ["Data emplacamento", "PLACA", "Chassi", "Marca", "Modelo", "Segmento", NOME_COLUNA_CONCESSIONARIO]
-            cols_hist = [col for col in cols_hist if col in client_df_sorted.columns]
-            client_df_display = client_df_sorted[cols_hist].rename(columns={
-                "Data emplacamento": "Data",
-                "PLACA": "Placa",
-                "Chassi": "Chassi",
-                "Marca": "Marca",
-                "Modelo": "Modelo",
-                "Segmento": "Segmento",
-                NOME_COLUNA_CONCESSIONARIO: "Concessionário"
-            })
-            if "Data" in client_df_display.columns:
-                client_df_display["Data"] = pd.to_datetime(client_df_display["Data"], errors="coerce").dt.strftime("%d/%m/%Y")
-            st.dataframe(client_df_display, use_container_width=True)
-        else:
-            st.error("Erro inesperado ao filtrar os dados do cliente.")
+        st.subheader(f"Detalhes de: {client_name}")
+        col1_info, col2_info = st.columns(2)
+        with col1_info:
+            st.markdown(f"<div class='info-card'><span class='label'>CNPJ:</span><span class='value'>{client_cnpj_formatted}</span></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='info-card'><span class='label'>Endereço:</span><span class='value'>{client_address}</span></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='info-card'><span class='label'>Modelo mais comprado:</span><span class='value'>{modelo_mais_comprado}</span></div>", unsafe_allow_html=True)
+        with col2_info:
+            st.markdown(f"<div class='info-card'><span class='label'>Cidade:</span><span class='value'>{client_city}</span></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='info-card'><span class='label'>Telefone:</span><span class='value'>{client_phone}</span></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='info-card'><span class='label'>Concessionário mais frequente:</span><span class='value'>{concessionario_mais_frequente}</span></div>", unsafe_allow_html=True)
+
+        st.markdown("#### Análise e Histórico")
+        total_purchases = len(client_df_sorted)
+        first_purchase_date = client_df_sorted["Data emplacamento"].min()
+        last_purchase_date = client_df_sorted["Data emplacamento"].max()
+        valid_purchase_dates = client_df_sorted["Data emplacamento"].dropna().tolist()
+        prediction_text, predicted_next_date = calculate_next_purchase_prediction(valid_purchase_dates)
+        sales_pitch = get_sales_pitch(last_purchase_date, predicted_next_date, total_purchases)
+        col1_insight, col2_predict = st.columns(2)
+        with col1_insight:
+            st.markdown(f"**Insight de Vendas:**")
+            st.info(sales_pitch)
+        with col2_predict:
+            st.markdown(f"**Previsão de Próxima Compra:**")
+            st.info(prediction_text)
+        col1_metric, col2_metric, col3_metric = st.columns(3)
+        col1_metric.metric("Total de Emplacamentos", total_purchases)
+        col2_metric.metric("Primeira Compra", first_purchase_date.strftime("%d/%m/%Y") if pd.notna(first_purchase_date) else "N/A")
+        col3_metric.metric("Última Compra", last_purchase_date.strftime("%d/%m/%Y") if pd.notna(last_purchase_date) else "N/A")
+        st.markdown("##### Histórico de Emplacamentos")
+        cols_hist = ["Data emplacamento", "PLACA", "Chassi", "Marca", "Modelo", "Segmento", NOME_COLUNA_CONCESSIONARIO]
+        cols_hist = [col for col in cols_hist if col in client_df_sorted.columns]
+        client_df_display = client_df_sorted[cols_hist].rename(columns={
+            "Data emplacamento": "Data",
+            "PLACA": "Placa",
+            "Chassi": "Chassi",
+            "Marca": "Marca",
+            "Modelo": "Modelo",
+            "Segmento": "Segmento",
+            NOME_COLUNA_CONCESSIONARIO: "Concessionário"
+        })
+        if "Data" in client_df_display.columns:
+            client_df_display["Data"] = pd.to_datetime(client_df_display["Data"], errors="coerce").dt.strftime("%d/%m/%Y")
+        st.dataframe(client_df_display, use_container_width=True)
 else:
     st.subheader("Resumo Geral da Base de Dados")
     st.markdown("*(Considerando os filtros aplicados na barra lateral, se houver)*")
