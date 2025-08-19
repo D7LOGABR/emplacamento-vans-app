@@ -457,7 +457,7 @@ if st.button("🔍 Listar Clientes Inativos ( > 1 ano sem comprar )"):
 
         # Botão para download em XLSX
         excel_buffer = BytesIO()
-        clientes_inativos.to_excel(excel_buffer, index=False, engine=\'openpyxl\')
+        clientes_inativos.to_excel(excel_buffer, index=False, engine='openpyxl')
         excel_buffer.seek(0)
         st.download_button(
             label="📥 Baixar Lista de Clientes Inativos (XLSX)",
