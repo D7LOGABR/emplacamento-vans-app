@@ -407,3 +407,61 @@ st.sidebar.divider()
 if os.path.exists(LOGO_WHITE_PATH):
     st.sidebar.image(LOGO_WHITE_PATH, width=150)
 st.sidebar.markdown("© De Nigris Distribuidora")
+
+
+# --- NOVO: Botão para listar clientes que compraram há mais de 1 ano e ainda não compraram em 2025 ---
+st.divider()
+st.subheader("📌 Oportunidades de Recompra")
+
+if st.button("🔍 Listar Clientes Inativos ( > 1 ano sem comprar )"):
+    hoje = pd.Timestamp.now()
+    ano_atual = hoje.year
+
+    # Última compra de cada cliente
+    ultima_compra = df_display.groupby("CNPJ_NORMALIZED")["Data emplacamento"].max().reset_index()
+    ultima_compra = ultima_compra.rename(columns={"Data emplacamento": "UltimaCompra"})
+
+    # Total de compras por cliente
+    total_compras = df_display.groupby("CNPJ_NORMALIZED").size().reset_index(name="TotalCompras")
+
+    # Juntar infos
+    clientes_info = pd.merge(ultima_compra, total_compras, on="CNPJ_NORMALIZED", how="left")
+
+    # Clientes que não compraram no ano atual e cuja última compra foi há mais de 12 meses
+    clientes_info = clientes_info[clientes_info["UltimaCompra"].notna()]
+    clientes_info["MesesSemCompra"] = ((hoje - clientes_info["UltimaCompra"]) / pd.Timedelta(days=30)).astype(int)
+    clientes_inativos = clientes_info[
+        (clientes_info["UltimaCompra"].dt.year < ano_atual) & 
+        (clientes_info["MesesSemCompra"] > 12)
+    ].copy()
+
+    if clientes_inativos.empty:
+        st.success("✅ Nenhum cliente inativo encontrado! Todos os clientes ativos compraram no último ano.")
+    else:
+        # Trazer dados adicionais (Nome, CNPJ e Cidade)
+        clientes_inativos = clientes_inativos.merge(
+            df_display[["CNPJ_NORMALIZED", "NOME DO CLIENTE", "CNPJ CLIENTE", "NO_CIDADE"]].drop_duplicates(),
+            on="CNPJ_NORMALIZED",
+            how="left"
+        )
+
+        clientes_inativos = clientes_inativos[[
+            "NOME DO CLIENTE", "CNPJ CLIENTE", "NO_CIDADE", "UltimaCompra", "TotalCompras", "MesesSemCompra"
+        ]].sort_values(by="MesesSemCompra", ascending=False)
+
+        clientes_inativos["UltimaCompra"] = clientes_inativos["UltimaCompra"].dt.strftime("%d/%m/%Y")
+
+        st.warning(f"🚨 {len(clientes_inativos)} clientes estão há mais de 1 ano sem comprar!")
+
+        st.dataframe(clientes_inativos, use_container_width=True)
+
+        # Botão para download em XLSX
+        excel_buffer = BytesIO()
+        clientes_inativos.to_excel(excel_buffer, index=False, engine=\'openpyxl\')
+        excel_buffer.seek(0)
+        st.download_button(
+            label="📥 Baixar Lista de Clientes Inativos (XLSX)",
+            data=excel_buffer,
+            file_name="clientes_inativos.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
