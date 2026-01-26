@@ -7,6 +7,29 @@ import os
 import numpy as np
 from io import BytesIO
 
+# =================== BLOQUEIO DE ACESSO ===================
+SENHA_CORRETA = "23290000"
+
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+
+if not st.session_state.autenticado:
+    st.markdown("## 🔒 Acesso Restrito")
+    st.markdown("Digite a senha para acessar o sistema.")
+
+    senha_digitada = st.text_input("Senha", type="password")
+
+    if st.button("Entrar"):
+        if senha_digitada == SENHA_CORRETA:
+            st.session_state.autenticado = True
+            st.success("✅ Acesso liberado")
+            st.rerun()
+        else:
+            st.error("❌ Senha incorreta")
+
+    st.stop()
+# =========================================================
+
 st.set_page_config(
     page_title="Emplacamentos VANS De Nigris",
     page_icon="🚚",
@@ -86,7 +109,6 @@ def load_data(file_path_or_buffer):
             st.error(f"Erro: Colunas essenciais não encontradas: {', '.join(missing_cols)}")
             return None
 
-        # Normalização da coluna PLACA (coluna M)
         placa_col = "PLACA"
         if placa_col in df.columns:
             df[placa_col] = df[placa_col].astype(str).str.strip().str.upper()
@@ -95,7 +117,6 @@ def load_data(file_path_or_buffer):
             df[placa_col] = ""
             df["PLACA_NORMALIZED"] = ""
 
-        # Normalização da coluna Concessionário
         concessionario_variations = ["CONCESSIONÁRIO", "concessionário", "Concessionário", "Concessionaria", "CONCESSIONARIO"]
         found_concessionario_col = next((col for col in concessionario_variations if col in df.columns), None)
         if found_concessionario_col and found_concessionario_col != NOME_COLUNA_CONCESSIONARIO:
@@ -119,7 +140,6 @@ def load_data(file_path_or_buffer):
     except Exception as e:
         st.error(f"Erro ao carregar/processar o arquivo: {e}")
         return None
-
 def get_modes(series):
     cleaned_series = series.dropna().astype(str)
     cleaned_series = cleaned_series[cleaned_series != "N/A"]
